@@ -5,3 +5,9 @@ node_modules/
 dist/
 coverage/
 *.log
+/generated/prisma
+# Skills locais instaladas pelo Prisma
+.agents/skills/
+.claude/skills/
+.windsurf/skills/
+skills-lock.json
