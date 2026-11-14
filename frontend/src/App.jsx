@@ -95,6 +95,50 @@ function App() {
     }
   }
 
+    async function editarCliente(cliente) {
+  const nome = window.prompt("Nome do cliente:", cliente.nome);
+
+  if (nome === null) {
+    return;
+  }
+
+  const telefone = window.prompt("Telefone do cliente:", cliente.telefone);
+
+  if (telefone === null) {
+    return;
+  }
+
+  setErro("");
+  setMensagem("");
+
+  try {
+    const resposta = await fetch(`/api/clientes/${cliente.id}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ nome, telefone }),
+    });
+
+    const clienteAtualizado = await resposta.json();
+
+    if (!resposta.ok) {
+      throw new Error(
+        clienteAtualizado.error || "Não foi possível atualizar o cliente."
+      );
+    }
+
+    setClientes((listaAtual) =>
+      listaAtual.map((item) =>
+        item.id === cliente.id ? clienteAtualizado : item
+      )
+    );
+    setMensagem("Cliente atualizado com sucesso.");
+  } catch (erroEnvio) {
+    setErro(erroEnvio.message);
+  }
+}
+
     async function cadastrarServico(evento) {
   evento.preventDefault();
   setErroServicos("");
@@ -247,6 +291,12 @@ function App() {
             {clientes.map((cliente) => (
               <li key={cliente.id}>
                 {cliente.nome} — {cliente.telefone}
+                <button
+                  type="button"
+                  onClick={() => editarCliente(cliente)}
+                >
+                  Editar
+                </button>
               </li>
             ))}
           </ul>
