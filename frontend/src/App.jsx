@@ -416,6 +416,16 @@ function App() {
                 Confirmar
               </button>
             )}
+            {agendamento.status === "CONFIRMADO" && (
+              <button
+                type="button"
+                onClick={() =>
+                  atualizarStatusAgendamento(agendamento.id, "CONCLUIDO")
+                }
+              >
+                Concluir
+              </button>
+            )}
           {(agendamento.status === "AGENDADO" ||
             agendamento.status === "CONFIRMADO"  ) && (
               <button
