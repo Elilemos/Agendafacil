@@ -60,6 +60,44 @@ app.get("/clientes/:id", async (req, res) => {
   res.json(cliente);
 });
 
+app.put("/clientes/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  const { nome, telefone } = req.body;
+
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "ID inválido." });
+  }
+
+  if (
+    typeof nome !== "string" ||
+    nome.trim() === "" ||
+    typeof telefone !== "string" ||
+    telefone.trim() === ""
+  ) {
+    return res.status(400).json({
+      error: "Informe nome e telefone.",
+    });
+  }
+
+  const clienteExistente = await prisma.cliente.findUnique({
+    where: { id },
+  });
+
+  if (!clienteExistente) {
+    return res.status(404).json({ error: "Cliente não encontrado." });
+  }
+
+  const clienteAtualizado = await prisma.cliente.update({
+    where: { id },
+    data: {
+      nome: nome.trim(),
+      telefone: telefone.trim(),
+    },
+  });
+
+  res.json(clienteAtualizado);
+});
+
 app.post("/clientes", async (req, res) => {
     const { nome, telefone } = req.body;
 
