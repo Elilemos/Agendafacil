@@ -1,7 +1,9 @@
 import express from "express";
 import { prisma } from "./database.js";
+import { inicioEstaNoFuturo } from "./appointmentRules.js";
 
 const app = express();
+export { app };
 app.use(express.json());
 const PORT = 3000;
 
@@ -152,10 +154,6 @@ app.patch("/agendamentos/:id/status", async (req, res) => {
   res.json(atualizado);
 });
 
-app.listen(PORT, () => {
-    console.log(`API disponível na porta ${PORT}.`);
-});
-
 app.post("/agendamentos", async (req, res) => {
   const { inicio, clienteId, servicoId } = req.body;
   const dataInicio = new Date(inicio);
@@ -173,7 +171,7 @@ app.post("/agendamentos", async (req, res) => {
     });
   }
 
-  if (dataInicio <= new Date()) {
+  if (!inicioEstaNoFuturo(dataInicio)) {
   return res.status(400).json({
     error: "O agendamento deve começar em uma data e horário futuros.",
   });
@@ -264,3 +262,9 @@ app.get("/agendamentos", async (req, res) => {
 
   res.json(agendamentos);
 });
+
+  if (process.env.NODE_ENV !== "test") {
+    app.listen(PORT, () => {
+        console.log(`API disponível na porta ${PORT}.`);
+    });
+}
