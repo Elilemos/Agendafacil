@@ -167,7 +167,7 @@ function App() {
   }
 }
 
-    async function cancelarAgendamento(id) {
+    async function atualizarStatusAgendamento(id, novoStatus) {
   setErroAgendamento("");
   setMensagemAgendamento("");
 
@@ -177,19 +177,19 @@ function App() {
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ status: "CANCELADO" }),
+      body: JSON.stringify({ status: novoStatus }),
     });
 
     const atualizado = await resposta.json();
 
     if (!resposta.ok) {
-      throw new Error(atualizado.error || "Não foi possível cancelar.");
+      throw new Error(atualizado.error || "Não foi possível atualizar.");
     }
 
     setAgendamentos((listaAtual) =>
       listaAtual.map((item) => (item.id === id ? atualizado : item))
     );
-    setMensagemAgendamento("Agendamento cancelado.");
+    setMensagemAgendamento(`Status atualizado para ${novoStatus}.`);
   } catch (erroEnvio) {
     setErroAgendamento(erroEnvio.message);
   }
@@ -406,11 +406,21 @@ function App() {
           {new Date(agendamento.inicio).toLocaleString("pt-BR")} —{" "}
           {agendamento.cliente.nome} — {agendamento.servico.nome} —{" "}
           {agendamento.status}
-          {(agendamento.status !== "AGENDADO" ||
-            agendamento.status !== "CANCELADO"  ) && (
+          {agendamento.status === "AGENDADO" && (
+              <button
+                type="button"
+                onClick={() =>
+                  atualizarStatusAgendamento(agendamento.id, "CONFIRMADO")
+                }
+              >
+                Confirmar
+              </button>
+            )}
+          {(agendamento.status === "AGENDADO" ||
+            agendamento.status === "CONFIRMADO"  ) && (
               <button
               type="button"
-              onClick={() => cancelarAgendamento(agendamento.id)}
+              onClick={() => atualizarStatusAgendamento(agendamento.id, "CANCELADO")}
               >
                 Cancelar
               </button>
