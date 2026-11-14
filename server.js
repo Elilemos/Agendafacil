@@ -135,6 +135,12 @@ app.post("/agendamentos", async (req, res) => {
     });
   }
 
+  if (dataInicio <= new Date()) {
+  return res.status(400).json({
+    error: "O agendamento deve começar em uma data e horário futuros.",
+  });
+  }
+
   const cliente = await prisma.cliente.findUnique({
     where: { id: clienteId },
   });
