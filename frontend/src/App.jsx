@@ -363,6 +363,9 @@ function App() {
       value={inicio}
       onChange={(evento) => setInicio(evento.target.value)}
       required
+      min={new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
+      .toISOString()
+      .slice(0, 16)}
     />
   </label>
 
