@@ -1,27 +1,216 @@
 import express from "express";
-import { prisma } from "./database.js";
+import pinoHttp from "pino-http";
 import { inicioEstaNoFuturo } from "./appointmentRules.js";
+import {
+  gerarHorariosDisponiveis,
+  lerHorariosFuncionamento,
+} from "./appointmentAvailability.js";
+import { logger } from "./logger.js";
+import {
+  autenticarProprietario,
+  cookieDeSessao,
+  cookieParaEncerrarSessao,
+  credenciaisDoProprietarioSaoValidas,
+  criarSessao,
+  encerrarSessao,
+  lerCookie,
+  limparFalhasLogin,
+  loginBloqueado,
+  NOME_COOKIE_SESSAO,
+  proprietarioConfigurado,
+  registrarFalhaLogin,
+} from "./auth.js";
+import { notificarAgendamento } from "./integrations/whatsappNotifier.js";
+import {
+  atualizarCliente,
+  buscarClientePorId,
+  criarCliente,
+  listarClientes,
+} from "./repositories/clienteRepository.js";
+import {
+  atualizarServicoAtivo,
+  buscarServicoPorId,
+  criarServico,
+  listarServicosPublicos,
+  listarServicosParaGerenciamento,
+} from "./repositories/servicoRepository.js";
+import {
+  atualizarStatusAgendamento,
+  buscarAgendamentoPorId,
+  buscarAgendamentosQuePodemConflitar,
+  criarAgendamento,
+  listarAgendamentosDoDia,
+  listarAgendamentos,
+} from "./repositories/agendamentoRepository.js";
+import {
+  agendamentosCriadosTotal,
+  httpRequestDurationSeconds,
+  httpRequestsTotal,
+  register,
+} from "./metrics.js";
 
 const app = express();
 export { app };
-app.use(express.json());
-const PORT = 3000;
 
-app.get("/health", (req, res) => {
-    res.json({ status: "ok" });
+const PORT = Number(process.env.PORT) || 3000;
+const statusPermitidos = [
+  "AGENDADO",
+  "CONFIRMADO",
+  "CANCELADO",
+  "CONCLUIDO",
+];
+
+app.use(pinoHttp({ logger }));
+
+app.use((req, res, next) => {
+  if (req.path === "/metrics") {
+    return next();
+  }
+
+  const encerrarCronometro = httpRequestDurationSeconds.startTimer();
+
+  res.on("finish", () => {
+    const rota = req.route ? req.baseUrl + req.route.path : "unmatched";
+    const labels = {
+      method: req.method,
+      route: rota,
+      status_code: String(res.statusCode),
+    };
+
+    httpRequestsTotal.inc(labels);
+    encerrarCronometro(labels);
+  });
+
+  next();
 });
 
-app.get("/clientes", async (req, res) => {
-    const clientes = await prisma.cliente.findMany();
-    res.json(clientes);
+app.use(express.json());
+app.use((req, res, next) => {
+  if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+    req.body = {};
+  }
+
+  next();
+});
+
+app.get("/auth/sessao", autenticarProprietario, (req, res) => {
+  res.json({ autenticado: true });
+});
+
+app.post("/auth/login", (req, res) => {
+  const { email, senha } = req.body;
+  const ip = req.ip;
+
+  if (!proprietarioConfigurado()) {
+    return res.status(503).json({
+      error: "Configure OWNER_EMAIL e OWNER_PASSWORD no arquivo .env.",
+    });
+  }
+
+  if (loginBloqueado(ip)) {
+    return res.status(429).json({
+      error: "Muitas tentativas. Aguarde 15 minutos antes de tentar novamente.",
+    });
+  }
+
+  if (
+    typeof email !== "string" ||
+    typeof senha !== "string" ||
+    !credenciaisDoProprietarioSaoValidas(email, senha)
+  ) {
+    registrarFalhaLogin(ip);
+    return res.status(401).json({ error: "E-mail ou senha inválidos." });
+  }
+
+  limparFalhasLogin(ip);
+  res.setHeader("Set-Cookie", cookieDeSessao(criarSessao()));
+  res.json({ autenticado: true });
+});
+
+app.post("/auth/logout", (req, res) => {
+  encerrarSessao(lerCookie(req, NOME_COOKIE_SESSAO));
+  res.setHeader("Set-Cookie", cookieParaEncerrarSessao());
+  res.status(204).end();
+});
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+app.get("/metrics", async (req, res) => {
+  res.setHeader("Content-Type", register.contentType);
+  res.end(await register.metrics());
+});
+
+app.get("/clientes", autenticarProprietario, async (req, res) => {
+  const clientes = await listarClientes();
+  res.json(clientes);
 });
 
 app.get("/servicos", async (req, res) => {
-    const servicos = await prisma.servico.findMany();
-    res.json(servicos);
+  const servicos = await listarServicosPublicos();
+  res.json(servicos);
 });
 
-app.post("/servicos", async (req, res) => {
+app.get("/servicos/gerenciamento", autenticarProprietario, async (req, res) => {
+  const servicos = await listarServicosParaGerenciamento();
+  res.json(servicos);
+});
+
+app.get("/disponibilidade", async (req, res) => {
+  const data = req.query.data;
+  const servicoId = Number(req.query.servicoId);
+
+  if (
+    typeof data !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(data) ||
+    !Number.isInteger(servicoId) ||
+    servicoId < 1
+  ) {
+    return res.status(400).json({
+      error: "Informe uma data no formato AAAA-MM-DD e um servicoId válido.",
+    });
+  }
+
+  const [ano, mes, dia] = data.split("-").map(Number);
+  const inicioDoDia = new Date(ano, mes - 1, dia);
+
+  if (
+    inicioDoDia.getFullYear() !== ano ||
+    inicioDoDia.getMonth() !== mes - 1 ||
+    inicioDoDia.getDate() !== dia
+  ) {
+    return res.status(400).json({ error: "A data informada não existe." });
+  }
+
+  const servico = await buscarServicoPorId(servicoId);
+
+  if (!servico) {
+    return res.status(404).json({ error: "Serviço não encontrado." });
+  }
+
+  if (!servico.ativo) {
+    return res.status(409).json({ error: "Este serviço está inativo." });
+  }
+
+  const fimDoDia = new Date(ano, mes - 1, dia + 1);
+  const [horarios, agendamentos] = await Promise.all([
+    Promise.resolve(lerHorariosFuncionamento(process.env.BUSINESS_HOURS)),
+    listarAgendamentosDoDia(inicioDoDia, fimDoDia),
+  ]);
+
+  res.json({
+    data,
+    horarios: gerarHorariosDisponiveis({
+      data,
+      duracaoMinutos: servico.duracaoMinutos,
+      horarios,
+      agendamentos,
+    }),
+  });
+});
+
+app.post("/servicos", autenticarProprietario, async (req, res) => {
   const { nome, descricao, duracaoMinutos, preco } = req.body;
 
   if (
@@ -37,23 +226,46 @@ app.post("/servicos", async (req, res) => {
     });
   }
 
-  const servico = await prisma.servico.create({
-    data: { nome, descricao, duracaoMinutos, preco },
+  const servico = await criarServico({
+    nome,
+    descricao,
+    duracaoMinutos,
+    preco,
   });
 
   res.status(201).json(servico);
 });
 
-app.get("/clientes/:id", async (req, res) => {
+app.patch("/servicos/:id/ativo", autenticarProprietario, async (req, res) => {
+  const id = Number(req.params.id);
+  const { ativo } = req.body;
+
+  if (!Number.isInteger(id) || id < 1) {
+    return res.status(400).json({ error: "ID de serviço inválido." });
+  }
+
+  if (typeof ativo !== "boolean") {
+    return res.status(400).json({ error: "Informe ativo como verdadeiro ou falso." });
+  }
+
+  const servicoExistente = await buscarServicoPorId(id);
+
+  if (!servicoExistente) {
+    return res.status(404).json({ error: "Serviço não encontrado." });
+  }
+
+  const servicoAtualizado = await atualizarServicoAtivo(id, ativo);
+  res.json(servicoAtualizado);
+});
+
+app.get("/clientes/:id", autenticarProprietario, async (req, res) => {
   const id = Number(req.params.id);
 
   if (!Number.isInteger(id) || id < 1) {
     return res.status(400).json({ error: "ID inválido." });
   }
 
-  const cliente = await prisma.cliente.findUnique({
-    where: { id },
-  });
+  const cliente = await buscarClientePorId(id);
 
   if (!cliente) {
     return res.status(404).json({ error: "Cliente não encontrado." });
@@ -62,7 +274,7 @@ app.get("/clientes/:id", async (req, res) => {
   res.json(cliente);
 });
 
-app.put("/clientes/:id", async (req, res) => {
+app.put("/clientes/:id", autenticarProprietario, async (req, res) => {
   const id = Number(req.params.id);
   const { nome, telefone } = req.body;
 
@@ -76,55 +288,48 @@ app.put("/clientes/:id", async (req, res) => {
     typeof telefone !== "string" ||
     telefone.trim() === ""
   ) {
-    return res.status(400).json({
-      error: "Informe nome e telefone.",
-    });
+    return res.status(400).json({ error: "Informe nome e telefone." });
   }
 
-  const clienteExistente = await prisma.cliente.findUnique({
-    where: { id },
-  });
+  const clienteExistente = await buscarClientePorId(id);
 
   if (!clienteExistente) {
     return res.status(404).json({ error: "Cliente não encontrado." });
   }
 
-  const clienteAtualizado = await prisma.cliente.update({
-    where: { id },
-    data: {
-      nome: nome.trim(),
-      telefone: telefone.trim(),
-    },
+  const clienteAtualizado = await atualizarCliente(id, {
+    nome: nome.trim(),
+    telefone: telefone.trim(),
   });
 
   res.json(clienteAtualizado);
 });
 
-app.post("/clientes", async (req, res) => {
-    const { nome, telefone } = req.body;
+app.post("/clientes", autenticarProprietario, async (req, res) => {
+  const { nome, telefone } = req.body;
 
-    if (!nome || !telefone) {
-        return res.status(400).json({
-            error: "Nome e telefone são obrigatórios.",
-        });
-    }
-
-    const cliente = await prisma.cliente.create({
-        data: {nome, telefone},
+  if (
+    typeof nome !== "string" ||
+    nome.trim() === "" ||
+    typeof telefone !== "string" ||
+    telefone.trim() === ""
+  ) {
+    return res.status(400).json({
+      error: "Nome e telefone são obrigatórios.",
     });
+  }
 
-    res.status(201).json(cliente);
+  const cliente = await criarCliente({
+    nome: nome.trim(),
+    telefone: telefone.trim(),
+  });
+
+  res.status(201).json(cliente);
 });
 
-app.patch("/agendamentos/:id/status", async (req, res) => {
+app.patch("/agendamentos/:id/status", autenticarProprietario, async (req, res) => {
   const id = Number(req.params.id);
   const { status } = req.body;
-  const statusPermitidos = [
-    "AGENDADO",
-    "CONFIRMADO",
-    "CANCELADO",
-    "CONCLUIDO",
-  ];
 
   if (!Number.isInteger(id) || id < 1) {
     return res.status(400).json({ error: "ID inválido." });
@@ -134,27 +339,123 @@ app.patch("/agendamentos/:id/status", async (req, res) => {
     return res.status(400).json({ error: "Status inválido." });
   }
 
-  const existente = await prisma.agendamento.findUnique({
-    where: { id },
-  });
+  const existente = await buscarAgendamentoPorId(id);
 
   if (!existente) {
     return res.status(404).json({ error: "Agendamento não encontrado." });
   }
 
-  const atualizado = await prisma.agendamento.update({
-    where: { id },
-    data: { status },
-    include: {
-      cliente: true,
-      servico: true,
-    },
-  });
+  const atualizado = await atualizarStatusAgendamento(id, status);
 
   res.json(atualizado);
 });
 
-app.post("/agendamentos", async (req, res) => {
+async function processarCriacaoAgendamento(
+  { dataInicio, clienteId, clienteDados, servicoId },
+  req,
+  res
+) {
+  let cliente;
+
+  if (clienteId) {
+    cliente = await buscarClientePorId(clienteId);
+
+    if (!cliente) {
+      return res.status(404).json({ error: "Cliente não encontrado." });
+    }
+  }
+
+  const servico = await buscarServicoPorId(servicoId);
+
+  if (!servico) {
+    return res.status(404).json({ error: "Serviço não encontrado." });
+  }
+
+  if (!servico.ativo) {
+    return res.status(409).json({ error: "Este serviço está inativo." });
+  }
+
+  const novoFim = new Date(
+    dataInicio.getTime() + servico.duracaoMinutos * 60_000
+  );
+
+  const candidatos = await buscarAgendamentosQuePodemConflitar(novoFim);
+
+  const temConflito = candidatos.some((existente) => {
+    const fimExistente =
+      new Date(existente.inicio).getTime() +
+      existente.servico.duracaoMinutos * 60_000;
+
+    return dataInicio.getTime() < fimExistente;
+  });
+
+  if (temConflito) {
+    return res.status(409).json({
+      error: "Esse horário se sobrepõe a outro agendamento ativo.",
+    });
+  }
+
+  const agendamento = await criarAgendamento({
+    inicio: dataInicio,
+    cliente: clienteId
+      ? { connect: { id: clienteId } }
+      : {
+          create: {
+            nome: clienteDados.nome.trim(),
+            telefone: clienteDados.telefone.trim(),
+          },
+        },
+    servico: { connect: { id: servicoId } },
+  });
+
+  agendamentosCriadosTotal.inc();
+  void notificarAgendamento(agendamento).catch((err) => {
+    req.log.error(
+      { err, agendamentoId: agendamento.id },
+      "Falha ao enviar notificação pelo WhatsApp."
+    );
+  });
+
+  return res.status(201).json(agendamento);
+}
+
+app.post("/agendamentos/publico", async (req, res) => {
+  const { inicio, nome, telefone, servicoId } = req.body;
+  const dataInicio = new Date(inicio);
+
+  if (
+    typeof inicio !== "string" ||
+    Number.isNaN(dataInicio.getTime()) ||
+    typeof nome !== "string" ||
+    nome.trim() === "" ||
+    typeof telefone !== "string" ||
+    telefone.trim() === "" ||
+    !Number.isInteger(servicoId) ||
+    servicoId < 1
+  ) {
+    return res.status(400).json({
+      error: "Informe data, nome, telefone e servicoId válidos.",
+    });
+  }
+
+  if (!inicioEstaNoFuturo(dataInicio)) {
+    return res.status(400).json({
+      error: "O agendamento deve começar em uma data e horário futuros.",
+    });
+  }
+
+  return processarCriacaoAgendamento(
+    {
+      dataInicio,
+      clienteDados: { nome, telefone },
+      servicoId,
+    },
+    req,
+    res
+  );
+});
+
+app.post("/agendamentos", autenticarProprietario, async (req, res) => {
   const { inicio, clienteId, servicoId } = req.body;
   const dataInicio = new Date(inicio);
 
@@ -172,99 +473,46 @@ app.post("/agendamentos", async (req, res) => {
   }
 
   if (!inicioEstaNoFuturo(dataInicio)) {
-  return res.status(400).json({
-    error: "O agendamento deve começar em uma data e horário futuros.",
-  });
-  }
-
-  const cliente = await prisma.cliente.findUnique({
-    where: { id: clienteId },
-  });
-
-  if (!cliente) {
-    return res.status(404).json({ error: "Cliente não encontrado." });
-  }
-
-  const servico = await prisma.servico.findUnique({
-    where: { id: servicoId },
-  });
-
-  if (!servico) {
-    return res.status(404).json({ error: "Serviço não encontrado." });
-  }
-
-  if (!servico.ativo) {
-    return res.status(409).json({ error: "Este serviço está inativo." });
-  }
-
-  const novoFim = new Date(
-    dataInicio.getTime() + servico.duracaoMinutos * 60_000
-  );
-
-  const candidatos = await prisma.agendamento.findMany({
-    where: {
-      status: { notIn: ["CANCELADO", "CONCLUIDO"] },
-      inicio: { lt: novoFim },
-    },
-    include: { servico: true },
-  });
-
-  const temConflito = candidatos.some((existente) => {
-    const fimExistente =
-      new Date(existente.inicio).getTime() +
-      existente.servico.duracaoMinutos * 60_000;
-
-    return dataInicio.getTime() < fimExistente;
-  });
-
-  if (temConflito) {
-    return res.status(409).json({
-      error: "Esse horário se sobrepõe a outro agendamento ativo.",
+    return res.status(400).json({
+      error: "O agendamento deve começar em uma data e horário futuros.",
     });
   }
 
-  const agendamento = await prisma.agendamento.create({
-    data: {
-      inicio: dataInicio,
-      cliente: { connect: { id: clienteId } },
-      servico: { connect: { id: servicoId } },
-    },
-    include: {
-      cliente: true,
-      servico: true,
-    },
-  });
-
-  res.status(201).json(agendamento);
+  return processarCriacaoAgendamento(
+    { dataInicio, clienteId, servicoId },
+    req,
+    res
+  );
 });
 
-app.get("/agendamentos", async (req, res) => {
+app.get("/agendamentos", autenticarProprietario, async (req, res) => {
   const { status } = req.query;
-  const statusPermitidos = [
-    "AGENDADO",
-    "CONFIRMADO",
-    "CANCELADO",
-    "CONCLUIDO",
-  ];
 
   if (status && !statusPermitidos.includes(status)) {
     return res.status(400).json({ error: "Status inválido." });
   }
 
-  const agendamentos = await prisma.agendamento.findMany({
-    where: status ? { status } : {},
-    orderBy: { inicio: "asc" },
-    include: {
-      cliente: true,
-      servico: true,
-    },
-  });
+  const agendamentos = await listarAgendamentos(status);
 
   res.json(agendamentos);
 });
 
-  if (process.env.NODE_ENV !== "test") {
-    app.listen(PORT, () => {
-        console.log(`API disponível na porta ${PORT}.`);
-    });
+app.use((err, req, res, next) => {
+  req.log.error({ err }, "Erro não tratado na API");
+
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  const status = Number.isInteger(err.status) ? err.status : 500;
+  const mensagem =
+    status >= 500 ? "Erro interno do servidor." : "Requisição inválida.";
+
+  res.status(status).json({ error: mensagem });
+});
+
+if (process.env.NODE_ENV !== "test") {
+  app.listen(PORT, () => {
+    logger.info({ port: PORT }, "API disponível");
+  });
 }

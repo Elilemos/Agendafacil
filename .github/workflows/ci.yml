@@ -1,0 +1,92 @@
+name: Integração contínua do AgendaFácil
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Testes e cobertura do backend
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.11-bookworm
+        env:
+          POSTGRES_USER: agendafacil
+          POSTGRES_PASSWORD: agendafacil
+          POSTGRES_DB: agendafacil_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agendafacil -d agendafacil_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://agendafacil:agendafacil@localhost:5432/agendafacil_test?schema=public
+      DATABASE_URL_TEST: postgresql://agendafacil:agendafacil@localhost:5432/agendafacil_test?schema=public
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v6
+      - name: Configurar Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: Instalar dependências
+        run: npm ci
+      - name: Gerar o Prisma Client
+        run: npx prisma generate
+      - name: Aplicar migrações do banco de dados
+        run: npx prisma migrate deploy
+      - name: Executar testes
+        run: npm test
+      - name: Gerar relatório de cobertura
+        run: npm run coverage
+      - name: Enviar relatório de cobertura como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobertura-backend
+          path: coverage/
+          if-no-files-found: error
+      - name: Iniciar a API para o teste rápido do k6
+        run: npm start > api.log 2>&1 &
+      - name: Aguardar a verificação de saúde da API
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:3000/health; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat api.log
+          exit 1
+      - name: Executar o teste rápido do k6
+        run: docker run --rm --network host -v "$GITHUB_WORKSPACE/k6:/scripts:ro" grafana/k6:1.8.2 run /scripts/smoke.js
+
+  frontend:
+    name: Análise estática e compilação do frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v6
+      - name: Configurar Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Instalar dependências do frontend
+        working-directory: frontend
+        run: npm ci
+      - name: Executar o ESLint
+        working-directory: frontend
+        run: npm run lint
+      - name: Compilar o frontend
+        working-directory: frontend
+        run: npm run build

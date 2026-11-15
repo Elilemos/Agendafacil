@@ -1,0 +1,523 @@
+openapi: 3.1.0
+info:
+  title: AgendaFácil API
+  version: 0.1.0
+  description: >
+    API do protótipo AgendaFácil. As rotas administrativas exigem sessão do
+    proprietário; a reserva pública não expõe a lista de clientes.
+servers:
+  - url: http://localhost:3000
+paths:
+  /health:
+    get:
+      summary: Verifica se a API está respondendo
+      responses:
+        "200":
+          description: API está respondendo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: ok
+  /metrics:
+    get:
+      summary: Expõe métricas Prometheus
+      responses:
+        "200":
+          description: Métricas do processo e das requisições HTTP
+          content:
+            text/plain:
+              schema:
+                type: string
+  /auth/login:
+    post:
+      summary: Inicia a sessão do proprietário
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, senha]
+              properties:
+                email:
+                  type: string
+                  format: email
+                senha:
+                  type: string
+                  format: password
+      responses:
+        "200":
+          description: Sessão iniciada
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Erro"
+        "503":
+          $ref: "#/components/responses/Erro"
+        "429":
+          $ref: "#/components/responses/Erro"
+  /auth/logout:
+    post:
+      summary: Encerra a sessão do proprietário
+      responses:
+        "204":
+          description: Sessão encerrada
+  /auth/sessao:
+    get:
+      summary: Verifica se há uma sessão autenticada
+      security:
+        - SessaoProprietario: []
+      responses:
+        "200":
+          description: Sessão válida
+        "401":
+          $ref: "#/components/responses/Erro"
+  /clientes:
+    get:
+      summary: Lista clientes
+      security:
+        - SessaoProprietario: []
+      responses:
+        "200":
+          description: Lista de clientes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Cliente"
+        "401":
+          $ref: "#/components/responses/Erro"
+    post:
+      summary: Cadastra cliente
+      security:
+        - SessaoProprietario: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClienteInput"
+      responses:
+        "201":
+          description: Cliente criado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cliente"
+        "400":
+          $ref: "#/components/responses/Erro"
+        "401":
+          $ref: "#/components/responses/Erro"
+  /clientes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      summary: Busca cliente pelo ID
+      security:
+        - SessaoProprietario: []
+      responses:
+        "200":
+          description: Cliente encontrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cliente"
+        "400":
+          $ref: "#/components/responses/Erro"
+        "404":
+          $ref: "#/components/responses/Erro"
+        "401":
+          $ref: "#/components/responses/Erro"
+    put:
+      summary: Atualiza nome e telefone de um cliente
+      security:
+        - SessaoProprietario: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClienteInput"
+      responses:
+        "200":
+          description: Cliente atualizado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cliente"
+        "400":
+          $ref: "#/components/responses/Erro"
+        "404":
+          $ref: "#/components/responses/Erro"
+        "401":
+          $ref: "#/components/responses/Erro"
+  /servicos:
+    get:
+      summary: Lista serviços ativos para o catálogo público
+      responses:
+        "200":
+          description: Lista de serviços
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Servico"
+    post:
+      summary: Cadastra serviço
+      security:
+        - SessaoProprietario: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServicoInput"
+      responses:
+        "201":
+          description: Serviço criado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Servico"
+        "400":
+          $ref: "#/components/responses/Erro"
+        "401":
+          $ref: "#/components/responses/Erro"
+  /servicos/gerenciamento:
+    get:
+      summary: Lista serviços ativos e inativos para o proprietário
+      security:
+        - SessaoProprietario: []
+      responses:
+        "200":
+          description: Lista completa de serviços
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Servico"
+        "401":
+          $ref: "#/components/responses/Erro"
+  /servicos/{id}/ativo:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    patch:
+      summary: Ativa ou desativa um serviço sem apagar seu histórico
+      security:
+        - SessaoProprietario: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ativo]
+              properties:
+                ativo:
+                  type: boolean
+      responses:
+        "200":
+          description: Estado do serviço atualizado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Servico"
+        "400":
+          $ref: "#/components/responses/Erro"
+        "401":
+          $ref: "#/components/responses/Erro"
+        "404":
+          $ref: "#/components/responses/Erro"
+  /disponibilidade:
+    get:
+      summary: Consulta horários disponíveis para um serviço em uma data
+      parameters:
+        - name: data
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: servicoId
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: Horários de início disponíveis no dia solicitado
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, horarios]
+                properties:
+                  data:
+                    type: string
+                    format: date
+                  horarios:
+                    type: array
+                    items:
+                      type: string
+                      pattern: "^([01]\\d|2[0-3]):[0-5]\\d$"
+        "400":
+          $ref: "#/components/responses/Erro"
+        "404":
+          $ref: "#/components/responses/Erro"
+        "409":
+          $ref: "#/components/responses/Erro"
+  /agendamentos/publico:
+    post:
+      summary: Cria uma reserva pública sem expor a lista de clientes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgendamentoPublicoInput"
+      responses:
+        "201":
+          description: Reserva criada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agendamento"
+        "400":
+          $ref: "#/components/responses/Erro"
+        "404":
+          $ref: "#/components/responses/Erro"
+        "409":
+          $ref: "#/components/responses/Erro"
+  /agendamentos:
+    get:
+      summary: Lista agendamentos, opcionalmente filtrados por status
+      security:
+        - SessaoProprietario: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/StatusAgendamento"
+      responses:
+        "200":
+          description: Agendamentos ordenados pelo início
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Agendamento"
+        "400":
+          $ref: "#/components/responses/Erro"
+        "401":
+          $ref: "#/components/responses/Erro"
+    post:
+      summary: Cria agendamento e rejeita sobreposição ou data passada
+      security:
+        - SessaoProprietario: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgendamentoInput"
+      responses:
+        "201":
+          description: Agendamento criado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agendamento"
+        "400":
+          $ref: "#/components/responses/Erro"
+        "404":
+          $ref: "#/components/responses/Erro"
+        "409":
+          $ref: "#/components/responses/Erro"
+        "401":
+          $ref: "#/components/responses/Erro"
+  /agendamentos/{id}/status:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    patch:
+      summary: Atualiza o status do agendamento
+      security:
+        - SessaoProprietario: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  $ref: "#/components/schemas/StatusAgendamento"
+      responses:
+        "200":
+          description: Agendamento atualizado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agendamento"
+        "400":
+          $ref: "#/components/responses/Erro"
+        "404":
+          $ref: "#/components/responses/Erro"
+        "401":
+          $ref: "#/components/responses/Erro"
+components:
+  securitySchemes:
+    SessaoProprietario:
+      type: apiKey
+      in: cookie
+      name: agendafacil_sessao
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+  responses:
+    Erro:
+      description: Requisição inválida ou recurso não encontrado
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Erro"
+  schemas:
+    Erro:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    StatusAgendamento:
+      type: string
+      enum: [AGENDADO, CONFIRMADO, CANCELADO, CONCLUIDO]
+    ClienteInput:
+      type: object
+      required: [nome, telefone]
+      properties:
+        nome:
+          type: string
+        telefone:
+          type: string
+    Cliente:
+      allOf:
+        - $ref: "#/components/schemas/ClienteInput"
+        - type: object
+          required: [id, createdAt, updatedAt]
+          properties:
+            id:
+              type: integer
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+    ServicoInput:
+      type: object
+      required: [nome, duracaoMinutos, preco]
+      properties:
+        nome:
+          type: string
+        descricao:
+          type: [string, "null"]
+        duracaoMinutos:
+          type: integer
+          minimum: 1
+        preco:
+          type: number
+          minimum: 0
+    Servico:
+      type: object
+      required: [id, nome, duracaoMinutos, preco, ativo, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        nome:
+          type: string
+        descricao:
+          type: [string, "null"]
+        duracaoMinutos:
+          type: integer
+          minimum: 1
+        preco:
+          type: string
+          description: Valor Decimal serializado como texto pelo Prisma.
+          example: "45.00"
+        ativo:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    AgendamentoInput:
+      type: object
+      required: [inicio, clienteId, servicoId]
+      properties:
+        inicio:
+          type: string
+          format: date-time
+        clienteId:
+          type: integer
+          minimum: 1
+        servicoId:
+          type: integer
+          minimum: 1
+    AgendamentoPublicoInput:
+      type: object
+      required: [inicio, nome, telefone, servicoId]
+      properties:
+        inicio:
+          type: string
+          format: date-time
+        nome:
+          type: string
+        telefone:
+          type: string
+        servicoId:
+          type: integer
+          minimum: 1
+    Agendamento:
+      type: object
+      required: [id, inicio, status, clienteId, servicoId, createdAt, updatedAt, cliente, servico]
+      properties:
+        id:
+          type: integer
+        inicio:
+          type: string
+          format: date-time
+        status:
+          $ref: "#/components/schemas/StatusAgendamento"
+        clienteId:
+          type: integer
+        servicoId:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        cliente:
+          $ref: "#/components/schemas/Cliente"
+        servico:
+          $ref: "#/components/schemas/Servico"
